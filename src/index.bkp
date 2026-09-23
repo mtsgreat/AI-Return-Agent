@@ -1,0 +1,228 @@
+require("dotenv").config();
+
+const OpenAI = require("openai");
+
+const openai = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY
+});
+
+const tools = [
+  {
+    type: "function",
+    function: {
+      name: "getOrder",
+      description: "Busca informações de um pedido pelo ID.",
+      parameters: {
+        type: "object",
+        properties: {
+          orderId: {
+            type: "number",
+            description: "ID do pedido"
+          }
+        },
+        required: ["orderId"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "checkReturnEligibility",
+      description: "Verifica se um pedido está elegível para devolução.",
+      parameters: {
+        type: "object",
+        properties: {
+          orderId: {
+            type: "number",
+            description: "ID do pedido"
+          }
+        },
+        required: ["orderId"]
+      }
+    }
+  }
+];
+
+
+const express = require("express");
+
+const app = express();
+
+app.use(express.json());
+
+const returns = [];
+
+const orders = [
+  {
+    id: 123,
+    product: "Teclado Mecânico",
+    status: "delivered",
+    daysSinceDelivery: 5
+  },
+  {
+    id: 456,
+    product: "Monitor 27",
+    status: "delivered",
+    daysSinceDelivery: 45
+  }
+];
+
+
+function createReturn(orderId) {
+  const eligibility = checkReturnEligibility(orderId);
+
+  if (!eligibility.eligible) {
+    return {
+      success: false,
+      reason: eligibility.reason
+    };
+  }
+
+  const newReturn = {
+    id: returns.length + 1,
+    orderId: orderId,
+    status: "requested"
+  };
+
+  returns.push(newReturn);
+
+  return {
+    success: true,
+    return: newReturn
+  };
+}
+
+
+
+function checkReturnEligibility(orderId) {
+  const order = getOrder(orderId);
+
+  if (!order) {
+    return {
+      eligible: false,
+      reason: "Order not found"
+    };
+  }
+
+  if (order.daysSinceDelivery > 30) {
+    return {
+      eligible: false,
+      reason: "Return period expired"
+    };
+  }
+
+  return {
+    eligible: true,
+    reason: "Order is within the 30-day return period"
+  };
+}
+
+function getOrder(orderId) {
+  const order = orders.find(order => order.id === orderId);
+
+  return order;
+}
+
+
+app.get("/orders/:id/return-eligibility", (req, res) => {
+  const orderId = Number(req.params.id);
+
+  const result = checkReturnEligibility(orderId);
+
+  return res.json(result);
+});
+
+
+
+app.get("/", (req, res) => {
+  res.json({
+    message: "AI Return Agent running"
+  });
+});
+
+app.get("/orders/:id", (req, res) => {
+  const orderId = Number(req.params.id);
+
+  const order = getOrder(orderId);
+
+  if (!order) {
+    return res.status(404).json({
+      message: "Order not found"
+    });
+  }
+
+  return res.json(order);
+});
+
+
+app.post("/returns/:orderId", (req, res) => {
+  const orderId = Number(req.params.orderId);
+
+  const result = createReturn(orderId);
+
+  if (!result.success) {
+    return res.status(400).json(result);
+  }
+
+  return res.status(201).json(result);
+});
+
+
+app.post("/chat", async (req, res) => {
+  const { message } = req.body;
+
+  try {
+
+    const completion = await openai.chat.completions.create({
+      model: "openrouter/free",
+
+      messages: [
+        {
+          role: "user",
+          content: message
+        }
+      ],
+
+      tools: tools
+    });
+
+    const response = completion.choices[0].message;
+
+   if (response.tool_calls) {
+        const toolCall = response.tool_calls[0];
+
+        const functionName = toolCall.function.name;
+
+        const args = JSON.parse(
+            toolCall.function.arguments
+        );
+
+        console.log("Function:", functionName);
+        console.log("Arguments:", args);
+
+        if (functionName === "getOrder") {
+            const result = getOrder(args.orderId);
+
+            console.log("Resultado da função:");
+            console.log(result);
+        }
+    }
+
+    console.log(response);
+
+    return res.json(response);
+
+  } catch (error) {
+
+    console.error(error);
+
+    return res.status(500).json({
+      error: "Error communicating with LLM"
+    });
+  }
+});
+
+app.listen(3000, () => {
+  console.log("Server running on http://localhost:3000");
+});
